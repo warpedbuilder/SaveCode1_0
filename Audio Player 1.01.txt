@@ -1,0 +1,259 @@
+local Tween = game:GetService("TweenService")
+local MPS = game:GetService("MarketplaceService")
+
+return function(plugin, button)
+	-- [1. SETUP & STATE]
+	button.Visible = false 
+	-- Persistence: Check for existing sound on the button so it survives closing
+	local Sound = button:FindFirstChild("JukeboxSound")
+	if not Sound then
+		Sound = Instance.new("Sound", button)
+		Sound.Name = "JukeboxSound"
+		Sound.Looped = false
+	end
+
+	local SavedList = plugin:GetSetting("AudioSaves") 
+	if not SavedList or #SavedList == 0 then SavedList = {'1848354536'} end 
+
+	local NameCache = {} 
+	local currentIndex = 1
+	local isPlaying = Sound.IsPlaying -- Sync to actual sound state
+	local active = true 
+	local VolLevels = {0, 0.15, 0.55, 1} 
+
+	-- [2. UI CONSTRUCTION]
+	local Overlay = Instance.new("Frame", button.Parent)
+	Overlay.Name = "JukeboxOverlay"
+	Overlay.Size = UDim2.new(1, 0, 0, 30)
+	Overlay.Position = button.Position
+	Overlay.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	Overlay.BorderColor3 = Color3.fromRGB(255, 150, 0)
+	Overlay.BorderSizePixel = 1
+	Overlay.ClipsDescendants = true 
+	Overlay.ZIndex = 105
+
+	-- Display Container 
+	local DisplayFrame = Instance.new("TextButton", Overlay)
+	DisplayFrame.Size = UDim2.new(0.4, 0, 1, 0)
+	DisplayFrame.Position = UDim2.new(0.2, 0, 0, 0)
+	DisplayFrame.BackgroundTransparency = 1
+	DisplayFrame.Text = "" 
+	DisplayFrame.ZIndex = 106
+
+	-- Helper: Create a Text Label for animation
+	local function createLabel(text, xPos)
+		local lbl = Instance.new("TextLabel", DisplayFrame)
+		lbl.Size = UDim2.new(1,0,1,0)
+		lbl.Position = UDim2.new(xPos, 0, 0, 0)
+		lbl.BackgroundTransparency = 1
+		lbl.TextColor3 = isPlaying and Color3.fromRGB(255, 150, 0) or Color3.fromRGB(150,150,150)
+		lbl.Font = Enum.Font.Code
+		lbl.TextSize = 11
+		lbl.Text = text
+		lbl.ZIndex = 106
+		return lbl
+	end
+
+	local currentLabel = createLabel("Loading...", 0)
+
+	-- Controls
+	local function makeBtn(text, xScale, widthScale)
+		local b = Instance.new("TextButton", Overlay)
+		b.Text = text
+		b.Size = UDim2.new(widthScale, 0, 1, 0)
+		b.Position = UDim2.new(xScale, 0, 0, 0)
+		b.BackgroundColor3 = Color3.fromRGB(40,40,40)
+		b.TextColor3 = Color3.new(1,1,1)
+		b.BorderSizePixel = 0
+		b.ZIndex = 107 
+		return b
+	end
+
+	-- Navigation Group
+	local btnPrev = makeBtn("<", 0, 0.2)
+	local btnNext = makeBtn(">", 0.6, 0.2)
+
+	-- Split Exit Group
+	local btnPlayToggle = makeBtn("||", 0.8, 0.1) -- Play/Pause
+	btnPlayToggle.BackgroundColor3 = Color3.fromRGB(50,50,50)
+
+	local btnExit = makeBtn("X", 0.9, 0.1) -- Exit (Minimize)
+	btnExit.BackgroundColor3 = Color3.fromRGB(150, 40, 40)
+
+	-- Input (Overlay)
+	local AddInput = Instance.new("TextBox", Overlay)
+	AddInput.Size = UDim2.new(0.4, 0, 1, 0)
+	AddInput.Position = UDim2.new(0.2, 0, 0, 0)
+	AddInput.BackgroundTransparency = 1 
+	AddInput.Text = ""
+	AddInput.PlaceholderText = "" 
+	AddInput.TextColor3 = Color3.new(1,1,1)
+	AddInput.TextTransparency = 1 
+	AddInput.ZIndex = 110 
+
+	-- [3. LOGIC FUNCTIONS]
+
+	local function getName(id)
+		if NameCache[id] then return NameCache[id] end
+		local rawID = string.match(id, "%d+") or id
+		local success, info = pcall(function() return MPS:GetProductInfo(tonumber(rawID)) end)
+		if success and info then
+			-- [SHORTEN NAME] Cap at 16 chars to allow Loop icon to fit
+			local n = info.Name
+			if #n > 16 then n = string.sub(n, 1, 14)..".." end
+			NameCache[id] = n
+			return n
+		else
+			return "ID: "..id
+		end
+	end
+
+	local function updateDisplay(direction) 
+		-- [UTF-8 LOOP ICON]
+		local loopIcon = Sound.Looped and "↻ " or "♫ "
+
+		local rawName = NameCache[SavedList[currentIndex]] or "Loading..."
+		local text = isPlaying and (loopIcon..rawName) or "|| PAUSED"
+
+		-- Update Toggle Button State
+		btnPlayToggle.Text = isPlaying and "||" or "▶"
+		btnPlayToggle.TextColor3 = isPlaying and Color3.fromRGB(255,150,0) or Color3.fromRGB(255,255,255)
+
+		if isPlaying and not NameCache[SavedList[currentIndex]] then
+			task.spawn(function()
+				local name = getName(SavedList[currentIndex])
+				if active and Overlay.Parent and SavedList[currentIndex] then
+					updateDisplay(0) 
+				end
+			end)
+		end
+
+		if direction == 0 then
+			currentLabel.Text = text
+			currentLabel.TextColor3 = isPlaying and Color3.fromRGB(255, 150, 0) or Color3.fromRGB(150,150,150)
+		else
+			local startX = (direction == 1) and 1 or -1 
+			local endX = (direction == 1) and -1 or 1   
+
+			local newLbl = createLabel(text, startX)
+			local oldLbl = currentLabel
+
+			Tween:Create(newLbl, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = UDim2.new(0,0,0,0)}):Play()
+
+			local outTween = Tween:Create(oldLbl, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = UDim2.new(endX,0,0,0)})
+			outTween:Play()
+			outTween.Completed:Connect(function() oldLbl:Destroy() end)
+
+			currentLabel = newLbl
+		end
+	end
+
+	local function save() plugin:SetSetting("AudioSaves", SavedList) end
+
+	local function playTrack(index, direction)
+		if index > #SavedList then index = 1 end
+		if index < 1 then index = #SavedList end
+		currentIndex = index
+
+		-- Don't restart if already playing the correct song
+		if Sound.SoundId ~= "rbxassetid://"..SavedList[currentIndex] or not Sound.IsPlaying then
+			Sound:Stop()
+			Sound.SoundId = "rbxassetid://"..SavedList[currentIndex]
+			Sound.TimePosition = 0
+			Sound:Play()
+		end
+
+		isPlaying = true
+		updateDisplay(direction or 1) 
+	end
+
+	-- [4. EVENTS]
+
+	task.spawn(function()
+		while active and Overlay.Parent do
+			local savedIdx = plugin:GetSetting("Distro_VolIdx") or 4
+			local targetVol = VolLevels[savedIdx]
+			if Sound.Volume ~= targetVol then Sound.Volume = targetVol end
+			task.wait(0.125) 
+		end
+	end)
+
+	Sound.Ended:Connect(function() 
+		playTrack(currentIndex + 1, 1) 
+	end)
+
+	btnPrev.MouseButton1Click:Connect(function() playTrack(currentIndex - 1, -1) end)
+	btnNext.MouseButton1Click:Connect(function() playTrack(currentIndex + 1, 1) end)
+
+	-- [LOOP TOGGLE VIA SCROLL]
+	DisplayFrame.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseWheel then
+			Sound.Looped = not Sound.Looped
+			updateDisplay(0) 
+		end
+	end)
+
+	-- Toggle Logic
+	local function togglePlay()
+		if isPlaying then
+			Sound:Pause()
+			isPlaying = false
+		else
+			Sound:Resume()
+			isPlaying = true
+		end
+		updateDisplay(0)
+	end
+
+	DisplayFrame.MouseButton1Click:Connect(togglePlay)
+	btnPlayToggle.MouseButton1Click:Connect(togglePlay)
+
+	AddInput.Focused:Connect(function()
+		AddInput.BackgroundTransparency = 0.2
+		AddInput.BackgroundColor3 = Color3.new(0,0,0)
+		AddInput.TextTransparency = 0
+		AddInput.PlaceholderText = "Add ID..."
+		currentLabel.Visible = false
+	end)
+
+	AddInput.FocusLost:Connect(function(enter)
+		AddInput.BackgroundTransparency = 1
+		AddInput.TextTransparency = 1
+		currentLabel.Visible = true
+
+		if enter and tonumber(AddInput.Text) then
+			table.insert(SavedList, AddInput.Text)
+			save()
+			playTrack(#SavedList, 1) 
+		end
+		AddInput.Text = ""
+	end)
+
+	DisplayFrame.MouseButton2Click:Connect(function()
+		if #SavedList > 1 then
+			table.remove(SavedList, currentIndex)
+			save()
+			playTrack(currentIndex, 1)
+		end
+	end)
+
+	-- [EXIT: MINIMIZE]
+	btnExit.MouseButton1Click:Connect(function()
+		active = false
+		-- NOTE: We destroy the overlay, but the Sound lives on in 'button'
+		Overlay:Destroy()
+		button.Visible = true 
+	end)
+
+	-- [INIT: RECOVERY MODE]
+	-- If sound is already running (from previous session), sync to it
+	if Sound.IsPlaying then
+		local currentId = string.match(Sound.SoundId, "%d+")
+		local foundIdx = 1
+		for i, id in ipairs(SavedList) do if id == currentId then foundIdx = i break end end
+		currentIndex = foundIdx
+		updateDisplay(0)
+	else
+		playTrack(currentIndex, 0)
+	end
+end
