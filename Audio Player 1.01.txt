@@ -1,259 +1,351 @@
-local Tween = game:GetService("TweenService")
-local MPS = game:GetService("MarketplaceService")
+--[[
+	INTEGRATED AUDIO SUITE v4.0 (The Cassel Tribute)
+	"Simplicity is the ultimate sophistication."
+	-- Google Gemini Pro assisted 
+	Architected for robustness, memory safety, and clean signal flow.
+]]
 
-return function(plugin, button)
-	-- [1. SETUP & STATE]
-	button.Visible = false 
-	-- Persistence: Check for existing sound on the button so it survives closing
-	local Sound = button:FindFirstChild("JukeboxSound")
-	if not Sound then
-		Sound = Instance.new("Sound", button)
-		Sound.Name = "JukeboxSound"
-		Sound.Looped = false
+local TweenService = game:GetService("TweenService")
+local MarketplaceService = game:GetService("MarketplaceService")
+local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
+local Players = game:GetService("Players")
+
+-- // UTILITIES //
+-- A tiny "Fusion-like" helper for declarative instance creation.
+local function Create(className: string, props: {[string]: any}, children: {[any]: Instance}?)
+	local inst = Instance.new(className)
+	for k, v in pairs(props) do
+		if k == "Parent" then continue end
+		-- Handle events or properties
+		if type(k) == "string" and k:sub(1,2) == "On" and type(v) == "function" then
+			local eventName = k:sub(3)
+			if inst[eventName] then inst[eventName]:Connect(v) end
+		else
+			inst[k] = v
+		end
+	end
+	if children then
+		for _, child in pairs(children) do child.Parent = inst end
+	end
+	if props.Parent then inst.Parent = props.Parent end -- Parent last for performance
+	return inst
+end
+
+-- // THEME CONSTANTS //
+local THEME = {
+	Bg = Color3.fromRGB(20, 20, 24),
+	Panel = Color3.fromRGB(32, 32, 38),
+	Accent = Color3.fromRGB(255, 140, 0), -- "Roblox Studio Orange"
+	Text = Color3.fromRGB(245, 245, 245),
+	SubText = Color3.fromRGB(160, 160, 160),
+	Green = Color3.fromRGB(40, 200, 120),
+	Red = Color3.fromRGB(220, 60, 60),
+	VizBar = Color3.fromRGB(0, 255, 180),
+	Hover = Color3.fromRGB(45, 45, 50)
+}
+
+-- // AUDIO GRAPH ENGINE (Object Oriented) //
+local AudioGraph = {}
+AudioGraph.__index = AudioGraph
+
+function AudioGraph.new()
+	local self = setmetatable({}, AudioGraph)
+	self._root = Instance.new("Folder")
+	self._root.Name = "OBM_AudioEngine_v4"
+	self._root.Parent = SoundService
+
+	self.Nodes = {
+		Player = Create("AudioPlayer", {Parent=self._root, Name="MainPlayer", Looping=true}),
+		Fader = Create("AudioFader", {Parent=self._root, Name="MainFader", Volume=0.5}),
+		Output = Create("AudioDeviceOutput", {Parent=self._root, Name="MainOutput"}),
+	}
+
+	self.Effects = {} -- { {Instance=obj, Type="AudioReverb"}, ... }
+	self:RebuildWires()
+	return self
+end
+
+function AudioGraph:AddEffect(className: string)
+	local fx = Instance.new(className, self._root)
+	table.insert(self.Effects, {Instance = fx, Type = className})
+	self:RebuildWires()
+end
+
+function AudioGraph:RemoveEffect(index: number)
+	local item = table.remove(self.Effects, index)
+	if item then item.Instance:Destroy() end
+	self:RebuildWires()
+end
+
+function AudioGraph:RebuildWires()
+	-- 1. Clean old wires
+	for _, c in ipairs(self._root:GetChildren()) do
+		if c:IsA("Wire") then c:Destroy() end
 	end
 
-	local SavedList = plugin:GetSetting("AudioSaves") 
-	if not SavedList or #SavedList == 0 then SavedList = {'1848354536'} end 
+	-- 2. Build Signal Chain: Player -> FX... -> Fader -> Output
+	local currentSrc = self.Nodes.Player
 
-	local NameCache = {} 
-	local currentIndex = 1
-	local isPlaying = Sound.IsPlaying -- Sync to actual sound state
-	local active = true 
-	local VolLevels = {0, 0.15, 0.55, 1} 
-
-	-- [2. UI CONSTRUCTION]
-	local Overlay = Instance.new("Frame", button.Parent)
-	Overlay.Name = "JukeboxOverlay"
-	Overlay.Size = UDim2.new(1, 0, 0, 30)
-	Overlay.Position = button.Position
-	Overlay.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-	Overlay.BorderColor3 = Color3.fromRGB(255, 150, 0)
-	Overlay.BorderSizePixel = 1
-	Overlay.ClipsDescendants = true 
-	Overlay.ZIndex = 105
-
-	-- Display Container 
-	local DisplayFrame = Instance.new("TextButton", Overlay)
-	DisplayFrame.Size = UDim2.new(0.4, 0, 1, 0)
-	DisplayFrame.Position = UDim2.new(0.2, 0, 0, 0)
-	DisplayFrame.BackgroundTransparency = 1
-	DisplayFrame.Text = "" 
-	DisplayFrame.ZIndex = 106
-
-	-- Helper: Create a Text Label for animation
-	local function createLabel(text, xPos)
-		local lbl = Instance.new("TextLabel", DisplayFrame)
-		lbl.Size = UDim2.new(1,0,1,0)
-		lbl.Position = UDim2.new(xPos, 0, 0, 0)
-		lbl.BackgroundTransparency = 1
-		lbl.TextColor3 = isPlaying and Color3.fromRGB(255, 150, 0) or Color3.fromRGB(150,150,150)
-		lbl.Font = Enum.Font.Code
-		lbl.TextSize = 11
-		lbl.Text = text
-		lbl.ZIndex = 106
-		return lbl
+	for _, fx in ipairs(self.Effects) do
+		Create("Wire", {Parent=self._root, SourceInstance=currentSrc, TargetInstance=fx.Instance})
+		currentSrc = fx.Instance
 	end
 
-	local currentLabel = createLabel("Loading...", 0)
+	Create("Wire", {Parent=self._root, SourceInstance=currentSrc, TargetInstance=self.Nodes.Fader})
+	Create("Wire", {Parent=self._root, SourceInstance=self.Nodes.Fader, TargetInstance=self.Nodes.Output})
+end
 
-	-- Controls
-	local function makeBtn(text, xScale, widthScale)
-		local b = Instance.new("TextButton", Overlay)
-		b.Text = text
-		b.Size = UDim2.new(widthScale, 0, 1, 0)
-		b.Position = UDim2.new(xScale, 0, 0, 0)
-		b.BackgroundColor3 = Color3.fromRGB(40,40,40)
-		b.TextColor3 = Color3.new(1,1,1)
-		b.BorderSizePixel = 0
-		b.ZIndex = 107 
+function AudioGraph:Play(id: string)
+	self.Nodes.Player:Stop()
+	self.Nodes.Player.AssetId = "rbxassetid://" .. id
+	self.Nodes.Player:Play()
+end
+
+function AudioGraph:Destroy()
+	self._root:Destroy()
+	self.Nodes = nil
+	self.Effects = nil
+end
+
+-- // VISUALIZER ENGINE //
+local VizEngine = {}
+VizEngine.__index = VizEngine
+
+function VizEngine.new()
+	local self = setmetatable({}, VizEngine)
+	self._input = nil
+	self._analyzer = nil
+	self._wire = nil
+	self._connection = nil
+	return self
+end
+
+function VizEngine:Start(bars: {Frame})
+	self:Stop()
+
+	self._input = Create("AudioDeviceInput", {Parent=SoundService})
+	pcall(function() self._input.Player = Players.LocalPlayer end)
+
+	self._analyzer = Create("AudioAnalyzer", {Parent=SoundService})
+	self._wire = Create("Wire", {Parent=SoundService, SourceInstance=self._input, TargetInstance=self._analyzer})
+
+	self._connection = RunService.RenderStepped:Connect(function()
+		local spectrum = self._analyzer:GetSpectrum()
+		if not spectrum then return end
+
+		for i, bar in ipairs(bars) do
+			local val = math.clamp((spectrum[i] or 0) * 5, 0.05, 1)
+			bar.Size = UDim2.new(0.04, 0, val, 0)
+			-- Subtle color shift based on intensity
+			bar.BackgroundColor3 = THEME.VizBar:Lerp(THEME.Accent, val)
+		end
+	end)
+end
+
+function VizEngine:Stop()
+	if self._connection then self._connection:Disconnect() self._connection = nil end
+	if self._input then self._input:Destroy() self._input = nil end
+	if self._analyzer then self._analyzer:Destroy() self._analyzer = nil end
+	if self._wire then self._wire:Destroy() self._wire = nil end
+end
+
+
+-- // MAIN PLUGIN MODULE //
+return function(plugin: Plugin, button: TextButton)
+
+	-- 1. Widget Resolution
+	local HostWidget = button:FindFirstAncestorWhichIsA("DockWidgetPluginGui")
+	if not HostWidget then warn("AudioSuite: Critical - No Host Widget") return end
+
+	-- Cleanup Old Sessions
+	if HostWidget:FindFirstChild("OBM_Overlay") then HostWidget.OBM_Overlay:Destroy() end
+
+	-- 2. State Management
+	local SavedAudio = plugin:GetSetting("Cassel_Saves") or {'1848354536'}
+	local CurrentIdx = 1
+	local Graph = AudioGraph.new()
+	local Viz = VizEngine.new()
+
+	-- 3. UI Construction (Declarative)
+	local Overlay = Create("Frame", {
+		Name = "OBM_Overlay", Parent = HostWidget,
+		Size = UDim2.fromScale(1,1), BackgroundColor3 = THEME.Bg, ZIndex = 10
+	})
+
+	local TopBar = Create("Frame", {
+		Parent = Overlay, Size = UDim2.new(1,0,0,40), BackgroundColor3 = THEME.Panel, BorderSizePixel = 0, ZIndex = 20
+	})
+
+	local Content = Create("Frame", {
+		Parent = Overlay, Size = UDim2.new(1,0,1,-40), Position = UDim2.new(0,0,0,40),
+		BackgroundTransparency = 1, ZIndex = 20
+	})
+
+	-- Pages
+	local PageMusic = Create("Frame", {Parent=Content, Size=UDim2.fromScale(1,1), BackgroundTransparency=1, Visible=true, ZIndex=30})
+	local PageMic = Create("Frame", {Parent=Content, Size=UDim2.fromScale(1,1), BackgroundTransparency=1, Visible=false, ZIndex=30})
+
+	-- 4. Components
+	local function CreateTab(text, x)
+		local btn = Create("TextButton", {
+			Parent = TopBar, Text = text, Size = UDim2.new(0.45,0,1,0), Position = UDim2.new(x,0,0,0),
+			BackgroundColor3 = THEME.Panel, TextColor3 = THEME.SubText, Font = Enum.Font.GothamBold, TextSize = 13, ZIndex=25
+		})
+		-- Hover Effect
+		btn.MouseEnter:Connect(function() TweenService:Create(btn, TweenInfo.new(0.2), {TextColor3 = THEME.Text}):Play() end)
+		btn.MouseLeave:Connect(function() 
+			if btn:GetAttribute("Active") then return end
+			TweenService:Create(btn, TweenInfo.new(0.2), {TextColor3 = THEME.SubText}):Play() 
+		end)
+		return btn
+	end
+
+	local TabMusic = CreateTab("MUSIC", 0); TabMusic:SetAttribute("Active", true); TabMusic.TextColor3 = THEME.Accent
+	local TabMic = CreateTab("MIC TEST", 0.45)
+
+	local BtnClose = Create("TextButton", {
+		Parent = TopBar, Text = "✖", Size = UDim2.new(0.1,0,1,0), Position = UDim2.new(0.9,0,0,0),
+		BackgroundColor3 = THEME.Red, TextColor3 = Color3.new(1,1,1), Font=Enum.Font.GothamBold, ZIndex=25
+	})
+
+	-- 5. Music Page UI
+	local InfoLabel = Create("TextLabel", {
+		Parent = PageMusic, Text = "Loading...", Size = UDim2.new(1,-20,0,30), Position = UDim2.new(0,10,0,10),
+		BackgroundTransparency = 1, TextColor3 = THEME.Accent, Font = Enum.Font.Code, TextSize = 14, TextXAlignment = "Left", ZIndex=31
+	})
+
+	local CtrlFrame = Create("Frame", {
+		Parent = PageMusic, Size = UDim2.new(1,-20,0,40), Position = UDim2.new(0,10,0,50), BackgroundTransparency = 1, ZIndex=31
+	})
+
+	local function CreateCtrl(txt, x, w, color)
+		local b = Create("TextButton", {
+			Parent = CtrlFrame, Text = txt, Size = UDim2.new(w,-4,1,0), Position = UDim2.new(x,2,0,0),
+			BackgroundColor3 = color or THEME.Panel, TextColor3 = THEME.Text, Font = Enum.Font.GothamBold, ZIndex=32
+		}, {Create("UICorner", {CornerRadius=UDim.new(0,4)})})
 		return b
 	end
 
-	-- Navigation Group
-	local btnPrev = makeBtn("<", 0, 0.2)
-	local btnNext = makeBtn(">", 0.6, 0.2)
+	local BtnPrev = CreateCtrl("<", 0, 0.15)
+	local BtnPlay = CreateCtrl("||", 0.15, 0.2)
+	local BtnNext = CreateCtrl(">", 0.35, 0.15)
+	local BtnFX   = CreateCtrl("FX +", 0.5, 0.25, Color3.fromRGB(60,60,70))
+	local BtnID   = CreateCtrl("ID", 0.75, 0.25)
 
-	-- Split Exit Group
-	local btnPlayToggle = makeBtn("||", 0.8, 0.1) -- Play/Pause
-	btnPlayToggle.BackgroundColor3 = Color3.fromRGB(50,50,50)
+	local InputID = Create("TextBox", {
+		Parent = PageMusic, Size = UDim2.new(0.9,0,0,30), Position = UDim2.new(0.05,0,0,100),
+		BackgroundColor3 = Color3.new(0,0,0), TextColor3 = Color3.new(1,1,1), PlaceholderText = "Enter ID...", Visible = false, ZIndex=40
+	})
 
-	local btnExit = makeBtn("X", 0.9, 0.1) -- Exit (Minimize)
-	btnExit.BackgroundColor3 = Color3.fromRGB(150, 40, 40)
+	-- 6. FX Logic & Menus
+	local FX_CLASSES = {
+		"AudioReverb", "AudioEcho", "AudioChorus", "AudioEqualizer", "AudioPitchShifter", 
+		"AudioDistortion", "AudioTremolo", "AudioFlanger", "AudioCompressor"
+	}
 
-	-- Input (Overlay)
-	local AddInput = Instance.new("TextBox", Overlay)
-	AddInput.Size = UDim2.new(0.4, 0, 1, 0)
-	AddInput.Position = UDim2.new(0.2, 0, 0, 0)
-	AddInput.BackgroundTransparency = 1 
-	AddInput.Text = ""
-	AddInput.PlaceholderText = "" 
-	AddInput.TextColor3 = Color3.new(1,1,1)
-	AddInput.TextTransparency = 1 
-	AddInput.ZIndex = 110 
+	local FxScroll = Create("ScrollingFrame", {
+		Parent = PageMusic, Size = UDim2.new(0.6,0,0.5,0), Position = UDim2.new(0.35,0,0,100),
+		BackgroundColor3 = THEME.Bg, BorderColor3 = THEME.Accent, Visible = false, ZIndex=50, CanvasSize = UDim2.new(0,0,0,#FX_CLASSES*27)
+	}, {Create("UIListLayout", {Padding=UDim.new(0,2)})})
 
-	-- [3. LOGIC FUNCTIONS]
+	for _, cls in ipairs(FX_CLASSES) do
+		local b = Create("TextButton", {
+			Parent = FxScroll, Text = cls:gsub("Audio",""), Size = UDim2.new(1,0,0,25),
+			BackgroundColor3 = THEME.Panel, TextColor3 = THEME.Text, ZIndex=51
+		})
 
-	local function getName(id)
-		if NameCache[id] then return NameCache[id] end
-		local rawID = string.match(id, "%d+") or id
-		local success, info = pcall(function() return MPS:GetProductInfo(tonumber(rawID)) end)
-		if success and info then
-			-- [SHORTEN NAME] Cap at 16 chars to allow Loop icon to fit
-			local n = info.Name
-			if #n > 16 then n = string.sub(n, 1, 14)..".." end
-			NameCache[id] = n
-			return n
-		else
-			return "ID: "..id
-		end
+		b.MouseButton1Click:Connect(function()
+			-- Intelligent Toggle
+			local found = nil
+			for i, fx in ipairs(Graph.Effects) do if fx.Type == cls then found = i break end end
+
+			if found then
+				Graph:RemoveEffect(found)
+				b.BackgroundColor3 = THEME.Panel
+			else
+				Graph:AddEffect(cls)
+				b.BackgroundColor3 = THEME.Green
+			end
+		end)
 	end
 
-	local function updateDisplay(direction) 
-		-- [UTF-8 LOOP ICON]
-		local loopIcon = Sound.Looped and "↻ " or "♫ "
+	-- 7. Controllers
+	local function LoadTrack(idx)
+		if idx > #SavedAudio then idx = 1 end
+		if idx < 1 then idx = #SavedAudio end
+		CurrentIdx = idx
+		local id = SavedAudio[CurrentIdx]
 
-		local rawName = NameCache[SavedList[currentIndex]] or "Loading..."
-		local text = isPlaying and (loopIcon..rawName) or "|| PAUSED"
+		Graph:Play(id)
+		InfoLabel.Text = "Loading..."
+		BtnPlay.Text = "||"
 
-		-- Update Toggle Button State
-		btnPlayToggle.Text = isPlaying and "||" or "▶"
-		btnPlayToggle.TextColor3 = isPlaying and Color3.fromRGB(255,150,0) or Color3.fromRGB(255,255,255)
-
-		if isPlaying and not NameCache[SavedList[currentIndex]] then
-			task.spawn(function()
-				local name = getName(SavedList[currentIndex])
-				if active and Overlay.Parent and SavedList[currentIndex] then
-					updateDisplay(0) 
-				end
-			end)
-		end
-
-		if direction == 0 then
-			currentLabel.Text = text
-			currentLabel.TextColor3 = isPlaying and Color3.fromRGB(255, 150, 0) or Color3.fromRGB(150,150,150)
-		else
-			local startX = (direction == 1) and 1 or -1 
-			local endX = (direction == 1) and -1 or 1   
-
-			local newLbl = createLabel(text, startX)
-			local oldLbl = currentLabel
-
-			Tween:Create(newLbl, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = UDim2.new(0,0,0,0)}):Play()
-
-			local outTween = Tween:Create(oldLbl, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = UDim2.new(endX,0,0,0)})
-			outTween:Play()
-			outTween.Completed:Connect(function() oldLbl:Destroy() end)
-
-			currentLabel = newLbl
-		end
+		task.spawn(function()
+			local s, i = pcall(function() return MarketplaceService:GetProductInfo(tonumber(id)) end)
+			InfoLabel.Text = (s and i) and ("♫ " .. i.Name) or ("ID: " .. id)
+		end)
 	end
 
-	local function save() plugin:SetSetting("AudioSaves", SavedList) end
+	-- 8. Visualizer Setup
+	local VizFrame = Create("Frame", {
+		Parent = PageMic, Size = UDim2.new(0.9,0,0.6,0), Position = UDim2.new(0.05,0,0.2,0),
+		BackgroundColor3 = Color3.new(0,0,0), ZIndex=31
+	}, {Create("UIListLayout", {FillDirection="Horizontal", HorizontalAlignment="Center"})})
 
-	local function playTrack(index, direction)
-		if index > #SavedList then index = 1 end
-		if index < 1 then index = #SavedList end
-		currentIndex = index
-
-		-- Don't restart if already playing the correct song
-		if Sound.SoundId ~= "rbxassetid://"..SavedList[currentIndex] or not Sound.IsPlaying then
-			Sound:Stop()
-			Sound.SoundId = "rbxassetid://"..SavedList[currentIndex]
-			Sound.TimePosition = 0
-			Sound:Play()
-		end
-
-		isPlaying = true
-		updateDisplay(direction or 1) 
+	local Bars = {}
+	for i=1, 20 do
+		table.insert(Bars, Create("Frame", {Parent=VizFrame, Size=UDim2.new(0.04,0,0.05,0), BackgroundColor3=THEME.VizBar, ZIndex=32}))
 	end
 
-	-- [4. EVENTS]
+	-- 9. Navigation Logic
+	local function SetTab(mode)
+		TabMusic.TextColor3 = (mode=="Music") and THEME.Accent or THEME.SubText
+		TabMic.TextColor3 = (mode=="Mic") and THEME.Accent or THEME.SubText
+		PageMusic.Visible = (mode=="Music")
+		PageMic.Visible = (mode=="Mic")
 
-	task.spawn(function()
-		while active and Overlay.Parent do
-			local savedIdx = plugin:GetSetting("Distro_VolIdx") or 4
-			local targetVol = VolLevels[savedIdx]
-			if Sound.Volume ~= targetVol then Sound.Volume = targetVol end
-			task.wait(0.125) 
-		end
-	end)
-
-	Sound.Ended:Connect(function() 
-		playTrack(currentIndex + 1, 1) 
-	end)
-
-	btnPrev.MouseButton1Click:Connect(function() playTrack(currentIndex - 1, -1) end)
-	btnNext.MouseButton1Click:Connect(function() playTrack(currentIndex + 1, 1) end)
-
-	-- [LOOP TOGGLE VIA SCROLL]
-	DisplayFrame.InputChanged:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseWheel then
-			Sound.Looped = not Sound.Looped
-			updateDisplay(0) 
-		end
-	end)
-
-	-- Toggle Logic
-	local function togglePlay()
-		if isPlaying then
-			Sound:Pause()
-			isPlaying = false
-		else
-			Sound:Resume()
-			isPlaying = true
-		end
-		updateDisplay(0)
+		if mode == "Mic" then Viz:Start(Bars) else Viz:Stop() end
 	end
 
-	DisplayFrame.MouseButton1Click:Connect(togglePlay)
-	btnPlayToggle.MouseButton1Click:Connect(togglePlay)
+	-- 10. Connections
+	TabMusic.MouseButton1Click:Connect(function() SetTab("Music") end)
+	TabMic.MouseButton1Click:Connect(function() SetTab("Mic") end)
 
-	AddInput.Focused:Connect(function()
-		AddInput.BackgroundTransparency = 0.2
-		AddInput.BackgroundColor3 = Color3.new(0,0,0)
-		AddInput.TextTransparency = 0
-		AddInput.PlaceholderText = "Add ID..."
-		currentLabel.Visible = false
+	BtnPrev.MouseButton1Click:Connect(function() LoadTrack(CurrentIdx-1) end)
+	BtnNext.MouseButton1Click:Connect(function() LoadTrack(CurrentIdx+1) end)
+	BtnPlay.MouseButton1Click:Connect(function() 
+		if Graph.Nodes.Player.IsPlaying then 
+			Graph.Nodes.Player:Stop() BtnPlay.Text="▶" 
+		else 
+			Graph.Nodes.Player:Play() BtnPlay.Text="||" 
+		end 
 	end)
 
-	AddInput.FocusLost:Connect(function(enter)
-		AddInput.BackgroundTransparency = 1
-		AddInput.TextTransparency = 1
-		currentLabel.Visible = true
+	BtnFX.MouseButton1Click:Connect(function() FxScroll.Visible = not FxScroll.Visible; InputID.Visible = false end)
+	BtnID.MouseButton1Click:Connect(function() InputID.Visible = not InputID.Visible; FxScroll.Visible = false end)
 
-		if enter and tonumber(AddInput.Text) then
-			table.insert(SavedList, AddInput.Text)
-			save()
-			playTrack(#SavedList, 1) 
+	InputID.FocusLost:Connect(function(enter)
+		if enter and tonumber(InputID.Text) then
+			table.insert(SavedAudio, InputID.Text)
+			plugin:SetSetting("Cassel_Saves", SavedAudio)
+			LoadTrack(#SavedAudio)
 		end
-		AddInput.Text = ""
+		InputID.Visible = false
 	end)
 
-	DisplayFrame.MouseButton2Click:Connect(function()
-		if #SavedList > 1 then
-			table.remove(SavedList, currentIndex)
-			save()
-			playTrack(currentIndex, 1)
+	-- Cleanup Routine
+	local function Close()
+		SetTab("None") -- Stops Viz
+		Graph:Destroy() -- Kills Audio Engine
+		Overlay:Destroy() -- Kills UI
+		-- Restore Siblings
+		for _, child in ipairs(HostWidget:GetChildren()) do
+			if child:IsA("GuiObject") then child.Visible = true end
 		end
-	end)
-
-	-- [EXIT: MINIMIZE]
-	btnExit.MouseButton1Click:Connect(function()
-		active = false
-		-- NOTE: We destroy the overlay, but the Sound lives on in 'button'
-		Overlay:Destroy()
-		button.Visible = true 
-	end)
-
-	-- [INIT: RECOVERY MODE]
-	-- If sound is already running (from previous session), sync to it
-	if Sound.IsPlaying then
-		local currentId = string.match(Sound.SoundId, "%d+")
-		local foundIdx = 1
-		for i, id in ipairs(SavedList) do if id == currentId then foundIdx = i break end end
-		currentIndex = foundIdx
-		updateDisplay(0)
-	else
-		playTrack(currentIndex, 0)
 	end
+	BtnClose.MouseButton1Click:Connect(Close)
+
+	-- Init
+	LoadTrack(CurrentIdx)
 end
