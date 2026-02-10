@@ -1,23 +1,26 @@
 --[[
-	INTEGRATED AUDIO SUITE v4.0 (The Cassel Tribute)
-	"Simplicity is the ultimate sophistication."
-	-- Google Gemini Pro assisted 
-	Architected for robustness, memory safety, and clean signal flow.
+	INTEGRATED AUDIO SUITE v28.0 (The Classic Contrast)
+	"Restored Aesthetics. Smart Buttons."
+	-- Google Gemini Pro struggled but did EPIC 
+	Fixes: 
+	- Library Selection reverted to Text-Only highlight (Clean Look).
+	- FX/Paint Buttons toggle Background Color (MenuColor) with Adaptive Text Contrast.
+	- Scroll-Wheel Color Picker & Saving maintained.
 ]]
 
 local TweenService = game:GetService("TweenService")
 local MarketplaceService = game:GetService("MarketplaceService")
 local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
-local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local Selection = game:GetService("Selection")
+local HttpService = game:GetService("HttpService")
 
 -- // UTILITIES //
--- A tiny "Fusion-like" helper for declarative instance creation.
 local function Create(className: string, props: {[string]: any}, children: {[any]: Instance}?)
 	local inst = Instance.new(className)
 	for k, v in pairs(props) do
 		if k == "Parent" then continue end
-		-- Handle events or properties
 		if type(k) == "string" and k:sub(1,2) == "On" and type(v) == "function" then
 			local eventName = k:sub(3)
 			if inst[eventName] then inst[eventName]:Connect(v) end
@@ -25,327 +28,484 @@ local function Create(className: string, props: {[string]: any}, children: {[any
 			inst[k] = v
 		end
 	end
-	if children then
-		for _, child in pairs(children) do child.Parent = inst end
-	end
-	if props.Parent then inst.Parent = props.Parent end -- Parent last for performance
+	if children then for _, child in pairs(children) do child.Parent = inst end end
+	if props.Parent then inst.Parent = props.Parent end
 	return inst
 end
 
--- // THEME CONSTANTS //
-local THEME = {
-	Bg = Color3.fromRGB(20, 20, 24),
-	Panel = Color3.fromRGB(32, 32, 38),
-	Accent = Color3.fromRGB(255, 140, 0), -- "Roblox Studio Orange"
-	Text = Color3.fromRGB(245, 245, 245),
-	SubText = Color3.fromRGB(160, 160, 160),
-	Green = Color3.fromRGB(40, 200, 120),
-	Red = Color3.fromRGB(220, 60, 60),
-	VizBar = Color3.fromRGB(0, 255, 180),
-	Hover = Color3.fromRGB(45, 45, 50)
-}
+local function SanitizeID(id)
+	return tostring(id):gsub("%D", "") 
+end
 
--- // AUDIO GRAPH ENGINE (Object Oriented) //
+-- Calculates readable text color (Black/White) based on background
+local function GetContrastColor(bg)
+	local brightness = (bg.R * 299 + bg.G * 587 + bg.B * 114) / 1000
+	return brightness > 0.6 and Color3.new(0,0,0) or Color3.new(1,1,1)
+end
+
+-- // AUDIO GRAPH ENGINE //
 local AudioGraph = {}
 AudioGraph.__index = AudioGraph
 
 function AudioGraph.new()
 	local self = setmetatable({}, AudioGraph)
-	self._root = Instance.new("Folder")
-	self._root.Name = "OBM_AudioEngine_v4"
-	self._root.Parent = SoundService
+	local existing = SoundService:FindFirstChild("OBM_AudioEngine_Persistent")
 
-	self.Nodes = {
-		Player = Create("AudioPlayer", {Parent=self._root, Name="MainPlayer", Looping=true}),
-		Fader = Create("AudioFader", {Parent=self._root, Name="MainFader", Volume=0.5}),
-		Output = Create("AudioDeviceOutput", {Parent=self._root, Name="MainOutput"}),
-	}
-
-	self.Effects = {} -- { {Instance=obj, Type="AudioReverb"}, ... }
-	self:RebuildWires()
+	if existing then
+		self._root = existing
+		self.Nodes = {
+			Player = existing:FindFirstChild("MainPlayer"),
+			Analyzer = existing:FindFirstChild("MusicAnalyzer"),
+			Fader = existing:FindFirstChild("MainFader"),
+			Output = existing:FindFirstChild("MainOutput"),
+		}
+		self.Effects = {}
+		for _, child in ipairs(existing:GetChildren()) do
+			if child:IsA("AudioEffect") or child:IsA("AudioEqualizer") or child:IsA("AudioFader") then
+				if child.Name ~= "MainFader" then 
+					table.insert(self.Effects, {Instance = child, Type = child.ClassName, Id = child:GetAttribute("ID")})
+				end
+			end
+		end
+	else
+		self._root = Instance.new("Folder")
+		self._root.Name = "OBM_AudioEngine_Persistent"
+		self._root.Parent = SoundService
+		self.Nodes = {
+			Player = Create("AudioPlayer", {Parent=self._root, Name="MainPlayer", Looping=true}),
+			Analyzer = Create("AudioAnalyzer", {Parent=self._root, Name="MusicAnalyzer"}),
+			Fader = Create("AudioFader", {Parent=self._root, Name="MainFader", Volume=0.5}),
+			Output = Create("AudioDeviceOutput", {Parent=self._root, Name="MainOutput"}),
+		}
+		self.Effects = {} 
+		self:RebuildWires()
+	end
 	return self
 end
 
 function AudioGraph:AddEffect(className: string)
 	local fx = Instance.new(className, self._root)
-	table.insert(self.Effects, {Instance = fx, Type = className})
+	local id = HttpService:GenerateGUID()
+	fx:SetAttribute("ID", id)
+	table.insert(self.Effects, {Instance = fx, Type = className, Id = id})
 	self:RebuildWires()
+	return fx
 end
 
-function AudioGraph:RemoveEffect(index: number)
-	local item = table.remove(self.Effects, index)
-	if item then item.Instance:Destroy() end
-	self:RebuildWires()
+function AudioGraph:RemoveEffect(className: string)
+	for i = #self.Effects, 1, -1 do
+		if self.Effects[i].Type == className then
+			local item = table.remove(self.Effects, i)
+			item.Instance:Destroy()
+			self:RebuildWires()
+			return true
+		end
+	end
+	return false
 end
 
 function AudioGraph:RebuildWires()
-	-- 1. Clean old wires
-	for _, c in ipairs(self._root:GetChildren()) do
-		if c:IsA("Wire") then c:Destroy() end
-	end
-
-	-- 2. Build Signal Chain: Player -> FX... -> Fader -> Output
+	for _, c in ipairs(self._root:GetChildren()) do if c:IsA("Wire") then c:Destroy() end end
 	local currentSrc = self.Nodes.Player
-
 	for _, fx in ipairs(self.Effects) do
 		Create("Wire", {Parent=self._root, SourceInstance=currentSrc, TargetInstance=fx.Instance})
 		currentSrc = fx.Instance
 	end
-
+	Create("Wire", {Parent=self._root, SourceInstance=currentSrc, TargetInstance=self.Nodes.Analyzer}) 
 	Create("Wire", {Parent=self._root, SourceInstance=currentSrc, TargetInstance=self.Nodes.Fader})
 	Create("Wire", {Parent=self._root, SourceInstance=self.Nodes.Fader, TargetInstance=self.Nodes.Output})
 end
 
-function AudioGraph:Play(id: string)
-	self.Nodes.Player:Stop()
-	self.Nodes.Player.AssetId = "rbxassetid://" .. id
-	self.Nodes.Player:Play()
+function AudioGraph:Play(id)
+	local cleanId = SanitizeID(id)
+	if cleanId == "" then return end
+	if self.Nodes.Player.AssetId ~= "rbxassetid://"..cleanId or not self.Nodes.Player.IsPlaying then
+		self.Nodes.Player:Stop()
+		self.Nodes.Player.AssetId = "rbxassetid://" .. cleanId
+		self.Nodes.Player:Play()
+	end
 end
 
 function AudioGraph:Destroy()
 	self._root:Destroy()
-	self.Nodes = nil
-	self.Effects = nil
 end
 
--- // VISUALIZER ENGINE //
-local VizEngine = {}
-VizEngine.__index = VizEngine
-
-function VizEngine.new()
-	local self = setmetatable({}, VizEngine)
-	self._input = nil
-	self._analyzer = nil
-	self._wire = nil
-	self._connection = nil
-	return self
-end
-
-function VizEngine:Start(bars: {Frame})
-	self:Stop()
-
-	self._input = Create("AudioDeviceInput", {Parent=SoundService})
-	pcall(function() self._input.Player = Players.LocalPlayer end)
-
-	self._analyzer = Create("AudioAnalyzer", {Parent=SoundService})
-	self._wire = Create("Wire", {Parent=SoundService, SourceInstance=self._input, TargetInstance=self._analyzer})
-
-	self._connection = RunService.RenderStepped:Connect(function()
-		local spectrum = self._analyzer:GetSpectrum()
-		if not spectrum then return end
-
-		for i, bar in ipairs(bars) do
-			local val = math.clamp((spectrum[i] or 0) * 5, 0.05, 1)
-			bar.Size = UDim2.new(0.04, 0, val, 0)
-			-- Subtle color shift based on intensity
-			bar.BackgroundColor3 = THEME.VizBar:Lerp(THEME.Accent, val)
-		end
-	end)
-end
-
-function VizEngine:Stop()
-	if self._connection then self._connection:Disconnect() self._connection = nil end
-	if self._input then self._input:Destroy() self._input = nil end
-	if self._analyzer then self._analyzer:Destroy() self._analyzer = nil end
-	if self._wire then self._wire:Destroy() self._wire = nil end
-end
-
-
--- // MAIN PLUGIN MODULE //
+-- // PLUGIN MAIN //
 return function(plugin: Plugin, button: TextButton)
 
-	-- 1. Widget Resolution
 	local HostWidget = button:FindFirstAncestorWhichIsA("DockWidgetPluginGui")
 	if not HostWidget then warn("AudioSuite: Critical - No Host Widget") return end
-
-	-- Cleanup Old Sessions
 	if HostWidget:FindFirstChild("OBM_Overlay") then HostWidget.OBM_Overlay:Destroy() end
 
-	-- 2. State Management
-	local SavedAudio = plugin:GetSetting("Cassel_Saves") or {'1848354536'}
-	local CurrentIdx = 1
-	local Graph = AudioGraph.new()
-	local Viz = VizEngine.new()
-
-	-- 3. UI Construction (Declarative)
-	local Overlay = Create("Frame", {
-		Name = "OBM_Overlay", Parent = HostWidget,
-		Size = UDim2.fromScale(1,1), BackgroundColor3 = THEME.Bg, ZIndex = 10
-	})
-
-	local TopBar = Create("Frame", {
-		Parent = Overlay, Size = UDim2.new(1,0,0,40), BackgroundColor3 = THEME.Panel, BorderSizePixel = 0, ZIndex = 20
-	})
-
-	local Content = Create("Frame", {
-		Parent = Overlay, Size = UDim2.new(1,0,1,-40), Position = UDim2.new(0,0,0,40),
-		BackgroundTransparency = 1, ZIndex = 20
-	})
-
-	-- Pages
-	local PageMusic = Create("Frame", {Parent=Content, Size=UDim2.fromScale(1,1), BackgroundTransparency=1, Visible=true, ZIndex=30})
-	local PageMic = Create("Frame", {Parent=Content, Size=UDim2.fromScale(1,1), BackgroundTransparency=1, Visible=false, ZIndex=30})
-
-	-- 4. Components
-	local function CreateTab(text, x)
-		local btn = Create("TextButton", {
-			Parent = TopBar, Text = text, Size = UDim2.new(0.45,0,1,0), Position = UDim2.new(x,0,0,0),
-			BackgroundColor3 = THEME.Panel, TextColor3 = THEME.SubText, Font = Enum.Font.GothamBold, TextSize = 13, ZIndex=25
-		})
-		-- Hover Effect
-		btn.MouseEnter:Connect(function() TweenService:Create(btn, TweenInfo.new(0.2), {TextColor3 = THEME.Text}):Play() end)
-		btn.MouseLeave:Connect(function() 
-			if btn:GetAttribute("Active") then return end
-			TweenService:Create(btn, TweenInfo.new(0.2), {TextColor3 = THEME.SubText}):Play() 
-		end)
-		return btn
+	local SiblingStates, LayoutStates = {}, {}
+	for _, child in ipairs(HostWidget:GetChildren()) do
+		if child:IsA("GuiObject") and child.Visible then SiblingStates[child]=true; child.Visible=false end
+		if child:IsA("UIListLayout") or child:IsA("UIGridLayout") or child:IsA("UIPadding") then LayoutStates[child]=child.Parent; child.Parent=nil end
 	end
 
-	local TabMusic = CreateTab("MUSIC", 0); TabMusic:SetAttribute("Active", true); TabMusic.TextColor3 = THEME.Accent
-	local TabMic = CreateTab("MIC TEST", 0.45)
+	-- // CONFIGURATION //
+	local SavedData = plugin:GetSetting("Cassel_Unified_v1") or {}
+	local Library = plugin:GetSetting("Cassel_Saves_v5") or {["Soundscape"]={'1848354536'}}
+	if not next(Library) then Library["Soundscape"] = {'1848354536'} end
 
-	local BtnClose = Create("TextButton", {
-		Parent = TopBar, Text = "✖", Size = UDim2.new(0.1,0,1,0), Position = UDim2.new(0.9,0,0,0),
-		BackgroundColor3 = THEME.Red, TextColor3 = Color3.new(1,1,1), Font=Enum.Font.GothamBold, ZIndex=25
-	})
-
-	-- 5. Music Page UI
-	local InfoLabel = Create("TextLabel", {
-		Parent = PageMusic, Text = "Loading...", Size = UDim2.new(1,-20,0,30), Position = UDim2.new(0,10,0,10),
-		BackgroundTransparency = 1, TextColor3 = THEME.Accent, Font = Enum.Font.Code, TextSize = 14, TextXAlignment = "Left", ZIndex=31
-	})
-
-	local CtrlFrame = Create("Frame", {
-		Parent = PageMusic, Size = UDim2.new(1,-20,0,40), Position = UDim2.new(0,10,0,50), BackgroundTransparency = 1, ZIndex=31
-	})
-
-	local function CreateCtrl(txt, x, w, color)
-		local b = Create("TextButton", {
-			Parent = CtrlFrame, Text = txt, Size = UDim2.new(w,-4,1,0), Position = UDim2.new(x,2,0,0),
-			BackgroundColor3 = color or THEME.Panel, TextColor3 = THEME.Text, Font = Enum.Font.GothamBold, ZIndex=32
-		}, {Create("UICorner", {CornerRadius=UDim.new(0,4)})})
-		return b
-	end
-
-	local BtnPrev = CreateCtrl("<", 0, 0.15)
-	local BtnPlay = CreateCtrl("||", 0.15, 0.2)
-	local BtnNext = CreateCtrl(">", 0.35, 0.15)
-	local BtnFX   = CreateCtrl("FX +", 0.5, 0.25, Color3.fromRGB(60,60,70))
-	local BtnID   = CreateCtrl("ID", 0.75, 0.25)
-
-	local InputID = Create("TextBox", {
-		Parent = PageMusic, Size = UDim2.new(0.9,0,0,30), Position = UDim2.new(0.05,0,0,100),
-		BackgroundColor3 = Color3.new(0,0,0), TextColor3 = Color3.new(1,1,1), PlaceholderText = "Enter ID...", Visible = false, ZIndex=40
-	})
-
-	-- 6. FX Logic & Menus
-	local FX_CLASSES = {
-		"AudioReverb", "AudioEcho", "AudioChorus", "AudioEqualizer", "AudioPitchShifter", 
-		"AudioDistortion", "AudioTremolo", "AudioFlanger", "AudioCompressor"
+	local State = {
+		BgColor = SavedData.BgColor and Color3.new(unpack(SavedData.BgColor)) or Color3.fromRGB(10, 10, 12),
+		VizColor = SavedData.VizColor and Color3.new(unpack(SavedData.VizColor)) or Color3.fromRGB(0, 255, 180),
+		MenuColor = SavedData.MenuColor and Color3.new(unpack(SavedData.MenuColor)) or Color3.fromRGB(255, 140, 0),
+		CurrentHue = SavedData.CurrentHue or 0,
+		CurrentSat = SavedData.CurrentSat or 1,
+		CurrentVal = SavedData.CurrentVal or 1,
+		VizCount = SavedData.VizCount or 40,
+		VizSens = SavedData.VizSens or 5,
+		PanelColor = Color3.fromRGB(25, 25, 30),
+		TextColor = Color3.fromRGB(240, 240, 240),
+		SubText = Color3.fromRGB(150, 150, 150),
+		Folder = Color3.fromRGB(45, 45, 55),
 	}
 
-	local FxScroll = Create("ScrollingFrame", {
-		Parent = PageMusic, Size = UDim2.new(0.6,0,0.5,0), Position = UDim2.new(0.35,0,0,100),
-		BackgroundColor3 = THEME.Bg, BorderColor3 = THEME.Accent, Visible = false, ZIndex=50, CanvasSize = UDim2.new(0,0,0,#FX_CLASSES*27)
-	}, {Create("UIListLayout", {Padding=UDim.new(0,2)})})
+	local function SaveAll()
+		local dataToSave = {
+			BgColor = {State.BgColor.R, State.BgColor.G, State.BgColor.B},
+			VizColor = {State.VizColor.R, State.VizColor.G, State.VizColor.B},
+			MenuColor = {State.MenuColor.R, State.MenuColor.G, State.MenuColor.B},
+			CurrentHue = State.CurrentHue,
+			CurrentSat = State.CurrentSat,
+			CurrentVal = State.CurrentVal,
+			VizCount = State.VizCount,
+			VizSens = State.VizSens
+		}
+		plugin:SetSetting("Cassel_Unified_v1", dataToSave)
+		plugin:SetSetting("Cassel_Saves_v5", Library)
+	end
 
-	for _, cls in ipairs(FX_CLASSES) do
-		local b = Create("TextButton", {
-			Parent = FxScroll, Text = cls:gsub("Audio",""), Size = UDim2.new(1,0,0,25),
-			BackgroundColor3 = THEME.Panel, TextColor3 = THEME.Text, ZIndex=51
-		})
+	local CurrentFolder = "Soundscape"
+	for k in pairs(Library) do CurrentFolder = k break end
+	local CurrentIdx = 1
 
-		b.MouseButton1Click:Connect(function()
-			-- Intelligent Toggle
-			local found = nil
-			for i, fx in ipairs(Graph.Effects) do if fx.Type == cls then found = i break end end
+	local Graph = AudioGraph.new()
+	local NameCache = {}
 
-			if found then
-				Graph:RemoveEffect(found)
-				b.BackgroundColor3 = THEME.Panel
+	-- UI LAYERS
+	local Overlay = Create("Frame", {Name="OBM_Overlay", Parent=HostWidget, Size=UDim2.fromScale(1,1), BackgroundColor3=State.BgColor, ZIndex=10})
+
+	local function ClosePlugin()
+		SaveAll()
+		Overlay:Destroy()
+		for c in pairs(SiblingStates) do c.Visible=true end for l, p in pairs(LayoutStates) do l.Parent=p end 
+	end
+
+	Create("TextButton", {
+		Parent = Overlay, Text = "✖", Size = UDim2.new(0,40,0,40), Position = UDim2.new(1,-40,0,0),
+		BackgroundTransparency = 1, TextColor3 = Color3.new(1,1,1), Font = Enum.Font.GothamBold, TextSize = 18, ZIndex = 100,
+		OnMouseButton1Click = ClosePlugin
+	})
+
+	-- DISPLAY
+	local Display = Create("Frame", {
+		Parent=Overlay, Size=UDim2.new(1,0,1,-60), Position=UDim2.new(0,0,0,0), 
+		BackgroundColor3=State.BgColor, ZIndex=15
+	})
+
+	-- VISUALIZER
+	local VizContainer = Create("Frame", {Parent=Display, Size=UDim2.new(1,0,1,0), BackgroundTransparency=1, ZIndex=16}, {
+		Create("UIListLayout", {FillDirection="Horizontal", HorizontalAlignment="Center", VerticalAlignment="Bottom", Padding=UDim.new(0,1)})
+	})
+
+	local Bars = {}
+	local function RebuildBars()
+		for _, c in ipairs(VizContainer:GetChildren()) do if c:IsA("Frame") then c:Destroy() end end
+		Bars = {}
+		for i = 1, State.VizCount do
+			table.insert(Bars, Create("Frame", {
+				Parent=VizContainer, Size=UDim2.new(1/State.VizCount, -1, 0.1, 0), 
+				BackgroundColor3=State.VizColor, BackgroundTransparency=0.4, BorderSizePixel=0, ZIndex=18
+			}))
+		end
+	end
+	RebuildBars()
+
+	-- INFO TEXT
+	local InfoContainer = Create("Frame", {Parent=Display, Size=UDim2.new(1,0,0,80), BackgroundTransparency=1, Position=UDim2.new(0,0,0,20), ZIndex=20})
+	local InfoTitle = Create("TextLabel", {Parent=InfoContainer, Size=UDim2.new(0.8,0,0,40), Position=UDim2.new(0.1,0,0,0), BackgroundTransparency=1, TextColor3=State.MenuColor, Font=Enum.Font.GothamBold, TextScaled=true, TextXAlignment="Center", Text="Loading...", ZIndex=21})
+
+	-- CONTROLS
+	local Controls = Create("Frame", {Parent=Overlay, Size=UDim2.new(1,0,0,60), Position=UDim2.new(0,0,1,-60), BackgroundTransparency=1, ZIndex=20})
+	local BtnLib -- Forward ref
+	local function MakeBtn(txt, xPct, col, cb)
+		return Create("TextButton", {
+			Parent = Controls, Text = txt, Size = UDim2.new(0.16,0,0.7,0), Position = UDim2.new(xPct,2,0,5),
+			BackgroundColor3 = col or State.PanelColor, TextColor3 = State.TextColor, Font = Enum.Font.GothamBold, TextSize = 12,
+			OnMouseButton1Click = cb, ZIndex = 25
+		}, {Create("UICorner", {CornerRadius=UDim.new(0,4)})})
+	end
+
+	local BtnPrev = MakeBtn("<", 0)
+	local BtnPlay = MakeBtn("||", 0.166)
+	local BtnNext = MakeBtn(">", 0.332)
+	local BtnFX   = MakeBtn("FX", 0.498, Color3.fromRGB(60,60,70))
+	BtnLib        = MakeBtn("LIB", 0.664, State.MenuColor)
+	local BtnSet  = MakeBtn("⚙", 0.830)
+
+	-- THEME ENGINE
+	local UpdatePaintButtons, RefreshLibrary, UpdateFxButtons
+
+	local function UpdateTheme()
+		Overlay.BackgroundColor3 = State.BgColor
+		Display.BackgroundColor3 = State.BgColor
+
+		local bgContrast = GetContrastColor(State.BgColor)
+		InfoTitle.TextColor3 = bgContrast -- Readable Title
+		BtnLib.BackgroundColor3 = State.MenuColor
+		BtnLib.TextColor3 = GetContrastColor(State.MenuColor) -- Readable Lib Button
+
+		if UpdatePaintButtons then UpdatePaintButtons() end
+		if RefreshLibrary then RefreshLibrary() end
+		if UpdateFxButtons then UpdateFxButtons() end
+	end
+
+	-- MENUS --
+	local LibFrame = Create("Frame", {Parent=Overlay, Size=UDim2.new(0.9,0,0.85,0), Position=UDim2.new(0.05,0,0.05,0), BackgroundColor3=State.BgColor, BorderColor3=State.MenuColor, Visible=false, ZIndex=60})
+	Create("TextButton", {Parent=LibFrame, Size=UDim2.new(1,0,0,25), BackgroundColor3=State.Red, Text="CLOSE LIBRARY", TextColor3=Color3.new(1,1,1), Font=Enum.Font.GothamBold, ZIndex=65, OnMouseButton1Click=function() LibFrame.Visible=false end})
+	local LibScroll = Create("ScrollingFrame", {Parent=LibFrame, Size=UDim2.new(1,0,0.8,0), Position=UDim2.new(0,0,0,25), BackgroundTransparency=1, ZIndex=61}, {Create("UIListLayout", {Padding=UDim.new(0,2)})})
+
+	-- SETTINGS FRAME
+	local SetFrame = Create("Frame", {Parent=Overlay, Size=UDim2.new(0.8,0,0.7,0), Position=UDim2.new(0.1,0,0.15,0), BackgroundColor3=State.PanelColor, BorderColor3=State.TextColor, Visible=false, ZIndex=60})
+	Create("TextLabel", {Parent=SetFrame, Text="SETTINGS", Size=UDim2.new(1,0,0,30), BackgroundTransparency=1, TextColor3=State.MenuColor, Font=Enum.Font.GothamBold, ZIndex=61})
+	Create("TextButton", {Parent=SetFrame, Text="CLOSE", Size=UDim2.new(0.2,0,0,30), Position=UDim2.new(0.8,0,0,0), BackgroundColor3=State.PanelColor, TextColor3=Color3.new(1,1,1), ZIndex=62, OnMouseButton1Click=function() SetFrame.Visible=false; SaveAll() end})
+
+	-- PAINT LOGIC
+	local PaintTargets = {Viz = true, Bg = false, Menu = false}
+	local PaintButtons = {} 
+
+	UpdatePaintButtons = function()
+		for mode, btn in pairs(PaintButtons) do
+			if PaintTargets[mode] then
+				-- ACTIVE (Toggled): Custom Menu Color + Contrast Text
+				btn.BackgroundColor3 = State.MenuColor 
+				btn.TextColor3 = GetContrastColor(State.MenuColor)
 			else
-				Graph:AddEffect(cls)
-				b.BackgroundColor3 = THEME.Green
+				-- INACTIVE: Dark Panel Color + White/Grey Text
+				btn.BackgroundColor3 = State.BgColor
+				btn.TextColor3 = State.TextColor
+			end
+		end
+	end
+
+	local function AddPaintBtn(txt, mode, y)
+		local b = Create("TextButton", {
+			Parent = SetFrame, Text = txt, Size = UDim2.new(0.4,0,0,30), Position = UDim2.new(0.05,0,y,0),
+			BackgroundColor3 = State.BgColor, TextColor3 = State.TextColor, ZIndex=61
+		})
+		PaintButtons[mode] = b
+		b.MouseButton1Click:Connect(function()
+			PaintTargets[mode] = not PaintTargets[mode]
+			UpdatePaintButtons()
+		end)
+	end
+
+	AddPaintBtn("Paint: Visualizer", "Viz", 0.15)
+	AddPaintBtn("Paint: Background", "Bg", 0.28)
+	AddPaintBtn("Paint: Menu Accent", "Menu", 0.41)
+	UpdatePaintButtons()
+
+	-- COLOR PICKER FRAME
+	local PickerFrame = Create("Frame", {
+		Parent=SetFrame, Size=UDim2.new(0.45,0,0.6,0), Position=UDim2.new(0.5,0,0.15,0), 
+		BackgroundColor3=Color3.new(0,0,0), ZIndex=61
+	})
+
+	-- GRADIENTS
+	local HueGrad = Create("UIGradient", {Rotation=90, Color=ColorSequence.new{ColorSequenceKeypoint.new(0,Color3.fromRGB(255,0,0)), ColorSequenceKeypoint.new(0.17,Color3.fromRGB(255,255,0)), ColorSequenceKeypoint.new(0.33,Color3.fromRGB(0,255,0)), ColorSequenceKeypoint.new(0.5,Color3.fromRGB(0,255,255)), ColorSequenceKeypoint.new(0.67,Color3.fromRGB(0,0,255)), ColorSequenceKeypoint.new(0.83,Color3.fromRGB(255,0,255)), ColorSequenceKeypoint.new(1,Color3.fromRGB(255,0,0))}})
+	local SatGrad = Create("UIGradient", {Rotation=90, Color=ColorSequence.new(Color3.new(1,0,0), Color3.new(1,1,1))}) 
+	local ValGrad = Create("UIGradient", {Rotation=90, Color=ColorSequence.new(Color3.new(1,0,0), Color3.new(0,0,0))})
+
+	local HueBar = Create("Frame", {Parent=PickerFrame, Size=UDim2.new(0.3,0,1,0), Position=UDim2.new(0,0,0,0), ZIndex=62}, {HueGrad})
+	local SatBar = Create("Frame", {Parent=PickerFrame, Size=UDim2.new(0.3,0,1,0), Position=UDim2.new(0.35,0,0,0), ZIndex=62}, {SatGrad})
+	local ValBar = Create("Frame", {Parent=PickerFrame, Size=UDim2.new(0.3,0,1,0), Position=UDim2.new(0.7,0,0,0), ZIndex=62}, {ValGrad})
+
+	local HueInd = Create("Frame", {Parent=HueBar, Size=UDim2.new(1,0,0,2), BackgroundColor3=Color3.new(1,1,1), ZIndex=63})
+	local SatInd = Create("Frame", {Parent=SatBar, Size=UDim2.new(1,0,0,2), BackgroundColor3=Color3.new(1,1,1), ZIndex=63})
+	local ValInd = Create("Frame", {Parent=ValBar, Size=UDim2.new(1,0,0,2), BackgroundColor3=Color3.new(1,1,1), ZIndex=63})
+
+	HueInd.Position = UDim2.new(0,0, 1-State.CurrentHue, -1)
+	SatInd.Position = UDim2.new(0,0, 1-State.CurrentSat, -1)
+	ValInd.Position = UDim2.new(0,0, 1-State.CurrentVal, -1)
+
+	local function ApplyColor()
+		local c = Color3.fromHSV(State.CurrentHue, State.CurrentSat, State.CurrentVal)
+		if PaintTargets.Viz then State.VizColor = c end
+		if PaintTargets.Bg then State.BgColor = c end
+		if PaintTargets.Menu then State.MenuColor = c end
+		UpdateTheme()
+
+		HueInd.Position = UDim2.new(0,0, 1-State.CurrentHue, -1)
+		SatInd.Position = UDim2.new(0,0, 1-State.CurrentSat, -1)
+		ValInd.Position = UDim2.new(0,0, 1-State.CurrentVal, -1)
+
+		local satColorBase = Color3.fromHSV(State.CurrentHue, 1, State.CurrentVal) 
+		SatGrad.Color = ColorSequence.new(satColorBase, Color3.new(1,1,1))
+		local valColorBase = Color3.fromHSV(State.CurrentHue, State.CurrentSat, 1)
+		ValGrad.Color = ColorSequence.new(valColorBase, Color3.new(0,0,0))
+	end
+
+	ApplyColor() 
+
+	local function ProcessScroll(input, type)
+		if input.UserInputType == Enum.UserInputType.MouseWheel then
+			local scrollDir = (input.Position.Z > 0) and 1 or -1
+			local change = scrollDir * 0.05
+
+			if type == "Hue" then 
+				State.CurrentHue = math.clamp(State.CurrentHue + change, 0, 1) 
+			elseif type == "Sat" then
+				State.CurrentSat = math.clamp(State.CurrentSat + change, 0, 1)
+			elseif type == "Val" then
+				State.CurrentVal = math.clamp(State.CurrentVal + change, 0, 1) 
+			end
+			ApplyColor()
+		end
+	end
+
+	HueBar.InputChanged:Connect(function(i) ProcessScroll(i, "Hue") end)
+	SatBar.InputChanged:Connect(function(i) ProcessScroll(i, "Sat") end)
+	ValBar.InputChanged:Connect(function(i) ProcessScroll(i, "Val") end)
+
+	local BtnDensity = Create("TextButton", {Parent=SetFrame, Text="Density: "..State.VizCount.." (Scroll)", Size=UDim2.new(0.4,0,0,30), Position=UDim2.new(0.05,0,0.6,0), BackgroundColor3=State.BgColor, TextColor3=GetContrastColor(State.BgColor), ZIndex=61})
+	local BtnSense = Create("TextButton", {Parent=SetFrame, Text="Sensitivity: "..State.VizSens.." (Scroll)", Size=UDim2.new(0.4,0,0,30), Position=UDim2.new(0.05,0,0.75,0), BackgroundColor3=State.BgColor, TextColor3=GetContrastColor(State.BgColor), ZIndex=61})
+
+	BtnDensity.InputChanged:Connect(function(input) if input.UserInputType==Enum.UserInputType.MouseWheel then local dir=(input.Position.Z>0) and 10 or -10 State.VizCount=math.clamp(State.VizCount+dir,10,100) BtnDensity.Text="Density: "..State.VizCount RebuildBars() end end)
+	BtnSense.InputChanged:Connect(function(input) if input.UserInputType==Enum.UserInputType.MouseWheel then local dir=(input.Position.Z>0) and 1 or -1 State.VizSens=math.clamp(State.VizSens+dir,1,20) BtnSense.Text="Sensitivity: "..State.VizSens end end)
+
+	Create("TextButton", {
+		Parent = SetFrame, Text = "STOP ENGINE (KILL AUDIO)", Size = UDim2.new(0.9,0,0,40), Position = UDim2.new(0.05,0,0.85,0),
+		BackgroundColor3 = State.Red, TextColor3 = Color3.new(1,1,1), Font = Enum.Font.GothamBold, ZIndex=62,
+		OnMouseButton1Click = function() Graph:Destroy(); ClosePlugin() end
+	})
+
+	-- FX MENU
+	local FxMenu = Create("ScrollingFrame", {Parent = Overlay, Size = UDim2.new(0.5,0,0.6,0), Position = UDim2.new(0.25,0,0.15,0), BackgroundColor3 = State.BgColor, Visible = false, ZIndex = 60}, {Create("UIListLayout", {})})
+	local FX_LIST = {"AudioReverb", "AudioEcho", "AudioEqualizer", "AudioDistortion", "AudioPitchShifter", "AudioTremolo", "AudioFlanger", "AudioCompressor", "AudioLimiter", "AudioChorus"}
+
+	local FxButtons = {}
+
+	UpdateFxButtons = function()
+		for _, btn in ipairs(FxButtons) do
+			if btn.Parent then
+				local isActive = btn:GetAttribute("Active")
+				if isActive then
+					-- ACTIVE: Custom Color + Contrast Text
+					btn.BackgroundColor3 = State.MenuColor
+					btn.TextColor3 = GetContrastColor(State.MenuColor)
+				else
+					-- INACTIVE: Dark Panel + White Text
+					btn.BackgroundColor3 = State.PanelColor
+					btn.TextColor3 = State.TextColor
+				end
+			end
+		end
+	end
+
+	for _, cls in ipairs(FX_LIST) do
+		local btn = Create("TextButton", {Parent = FxMenu, Text = cls:gsub("Audio",""), Size = UDim2.new(1,0,0,30), BackgroundColor3 = State.PanelColor, TextColor3 = State.TextColor, ZIndex = 61})
+		table.insert(FxButtons, btn)
+		local active = false
+		for _, fx in ipairs(Graph.Effects) do if fx.Type == cls then active = true break end end
+		btn:SetAttribute("Active", active)
+
+		btn.MouseButton1Click:Connect(function()
+			local active = false
+			for _, fx in ipairs(Graph.Effects) do if fx.Type == cls then active = true break end end
+			if active then 
+				Graph:RemoveEffect(cls)
+				btn:SetAttribute("Active", false)
+			else 
+				local newFx = Graph:AddEffect(cls)
+				Selection:Set({newFx})
+				btn:SetAttribute("Active", true)
+			end
+			UpdateFxButtons()
+		end)
+	end
+	UpdateFxButtons()
+
+	local function SaveData() SaveAll() end
+	local LoadTrack
+	local LibState = "Folders"
+
+	RefreshLibrary = function()
+		for _, c in ipairs(LibScroll:GetChildren()) do if c:IsA("GuiObject") then c:Destroy() end end
+		if LibState == "Folders" then
+			for folderName, _ in pairs(Library) do
+				Create("TextButton", {Parent = LibScroll, Size = UDim2.new(1,0,0,35), Text = "  📂 " .. folderName, BackgroundColor3 = State.Folder, TextColor3 = Color3.new(1,1,1), TextXAlignment = "Left", Font = Enum.Font.GothamBold, ZIndex = 62, OnMouseButton1Click = function() CurrentFolder=folderName; LibState="Songs"; RefreshLibrary() end})
+			end
+		elseif LibState == "Songs" then
+			Create("TextButton", {Parent = LibScroll, Size = UDim2.new(1,0,0,30), Text = "  ⬅ BACK TO FOLDERS", BackgroundColor3 = State.MenuColor, TextColor3 = GetContrastColor(State.MenuColor), TextXAlignment = "Left", Font = Enum.Font.GothamBold, ZIndex = 62, OnMouseButton1Click = function() LibState = "Folders" RefreshLibrary() end})
+			for i, id in ipairs(Library[CurrentFolder] or {}) do
+				local isSelected = (i == CurrentIdx)
+				-- LIBRARY: Reverted to Text Highlight Only (Classic Style)
+				Create("TextButton", {
+					Parent = LibScroll, Size = UDim2.new(1,0,0,25), Text = "    ♫ " .. (NameCache[id] or id), 
+					BackgroundColor3 = State.PanelColor, -- Always Dark
+					TextColor3 = isSelected and State.MenuColor or State.SubText, -- Text highlights instead
+					TextXAlignment = "Left", Font = Enum.Font.Code, ZIndex = 62, 
+					OnMouseButton1Click = function() CurrentIdx = i; LoadTrack(CurrentIdx) end
+				})
+			end
+		end
+		LibScroll.CanvasSize = UDim2.new(0,0,0, #LibScroll:GetChildren() * 35)
+	end
+
+	local InputOverlay = Create("Frame", {Parent = LibFrame, Size = UDim2.fromScale(1,1), BackgroundColor3 = Color3.new(0,0,0), BackgroundTransparency = 0.2, Visible = false, ZIndex = 70})
+	local InputBox = Create("TextBox", {Parent = InputOverlay, Size = UDim2.new(0.8,0,0,40), Position = UDim2.new(0.1,0,0.4,0), BackgroundColor3 = State.BgColor, TextColor3 = State.TextColor, BorderColor3 = State.MenuColor, Font = Enum.Font.Gotham, ZIndex = 71})
+	Create("TextButton", { Parent = LibFrame, Text = "+ FOLDER", Size = UDim2.new(0.5,0,0.1,0), Position = UDim2.new(0,0,0.9,0), BackgroundColor3 = State.PanelColor, TextColor3 = State.TextColor, Font = Enum.Font.GothamBold, ZIndex = 63, OnMouseButton1Click = function() InputBox.Visible=true; InputOverlay.Visible=true; InputBox:CaptureFocus() InputBox.FocusLost:Connect(function(e) if e and #InputBox.Text>0 then Library[InputBox.Text]={}; SaveData(); LibState="Folders"; RefreshLibrary() end InputBox.Text=""; InputOverlay.Visible=false end) end })
+	Create("TextButton", { Parent = LibFrame, Text = "+ AUDIO", Size = UDim2.new(0.5,0,0.1,0), Position = UDim2.new(0.5,0,0.9,0), BackgroundColor3 = State.PanelColor, TextColor3 = State.TextColor, Font = Enum.Font.GothamBold, ZIndex = 63, OnMouseButton1Click = function() InputBox.Visible=true; InputOverlay.Visible=true; InputBox:CaptureFocus() InputBox.FocusLost:Connect(function(e) if e and tonumber(InputBox.Text) then table.insert(Library[CurrentFolder], InputBox.Text); SaveData(); LibState="Songs"; RefreshLibrary(); CurrentIdx=#Library[CurrentFolder]; LoadTrack(CurrentIdx) end InputBox.Text=""; InputOverlay.Visible=false end) end })
+
+	LoadTrack = function(idx)
+		local folder = Library[CurrentFolder]
+		if not folder or #folder == 0 then return end
+		if idx > #folder then idx = 1 end if idx < 1 then idx = #folder end
+		CurrentIdx = idx; local id = folder[CurrentIdx]
+
+		local cleanId = SanitizeID(id)
+		Graph:Play(cleanId)
+		InfoTitle.Text = "Loading..."
+		BtnPlay.Text = "||"
+		RefreshLibrary()
+
+		task.spawn(function()
+			if NameCache[cleanId] then InfoTitle.Text = NameCache[cleanId] else
+				local s, i = pcall(function() return MarketplaceService:GetProductInfo(tonumber(cleanId)) end)
+				NameCache[cleanId] = (s and i) and i.Name or ("Track "..cleanId)
+				InfoTitle.Text = NameCache[cleanId]; RefreshLibrary() 
 			end
 		end)
 	end
 
-	-- 7. Controllers
-	local function LoadTrack(idx)
-		if idx > #SavedAudio then idx = 1 end
-		if idx < 1 then idx = #SavedAudio end
-		CurrentIdx = idx
-		local id = SavedAudio[CurrentIdx]
-
-		Graph:Play(id)
-		InfoLabel.Text = "Loading..."
-		BtnPlay.Text = "||"
-
-		task.spawn(function()
-			local s, i = pcall(function() return MarketplaceService:GetProductInfo(tonumber(id)) end)
-			InfoLabel.Text = (s and i) and ("♫ " .. i.Name) or ("ID: " .. id)
-		end)
-	end
-
-	-- 8. Visualizer Setup
-	local VizFrame = Create("Frame", {
-		Parent = PageMic, Size = UDim2.new(0.9,0,0.6,0), Position = UDim2.new(0.05,0,0.2,0),
-		BackgroundColor3 = Color3.new(0,0,0), ZIndex=31
-	}, {Create("UIListLayout", {FillDirection="Horizontal", HorizontalAlignment="Center"})})
-
-	local Bars = {}
-	for i=1, 20 do
-		table.insert(Bars, Create("Frame", {Parent=VizFrame, Size=UDim2.new(0.04,0,0.05,0), BackgroundColor3=THEME.VizBar, ZIndex=32}))
-	end
-
-	-- 9. Navigation Logic
-	local function SetTab(mode)
-		TabMusic.TextColor3 = (mode=="Music") and THEME.Accent or THEME.SubText
-		TabMic.TextColor3 = (mode=="Mic") and THEME.Accent or THEME.SubText
-		PageMusic.Visible = (mode=="Music")
-		PageMic.Visible = (mode=="Mic")
-
-		if mode == "Mic" then Viz:Start(Bars) else Viz:Stop() end
-	end
-
-	-- 10. Connections
-	TabMusic.MouseButton1Click:Connect(function() SetTab("Music") end)
-	TabMic.MouseButton1Click:Connect(function() SetTab("Mic") end)
-
 	BtnPrev.MouseButton1Click:Connect(function() LoadTrack(CurrentIdx-1) end)
 	BtnNext.MouseButton1Click:Connect(function() LoadTrack(CurrentIdx+1) end)
-	BtnPlay.MouseButton1Click:Connect(function() 
-		if Graph.Nodes.Player.IsPlaying then 
-			Graph.Nodes.Player:Stop() BtnPlay.Text="▶" 
-		else 
-			Graph.Nodes.Player:Play() BtnPlay.Text="||" 
-		end 
+	BtnPlay.MouseButton1Click:Connect(function() if Graph.Nodes.Player.IsPlaying then Graph.Nodes.Player:Stop() BtnPlay.Text="▶" else Graph.Nodes.Player:Play() BtnPlay.Text="||" end end)
+	BtnLib.MouseButton1Click:Connect(function() LibFrame.Visible = not LibFrame.Visible; if LibFrame.Visible then RefreshLibrary() end end)
+	BtnFX.MouseButton1Click:Connect(function() FxMenu.Visible = not FxMenu.Visible end)
+	BtnSet.MouseButton1Click:Connect(function() SetFrame.Visible = not SetFrame.Visible end)
+
+	RunService.RenderStepped:Connect(function()
+		local success, spec = pcall(function() return Graph.Nodes.Analyzer:GetSpectrum() end)
+		if not success or not spec then return end
+		for i, bar in ipairs(Bars) do
+			local val = math.clamp((spec[i] or 0) * State.VizSens, 0.05, 1)
+			bar.Size = UDim2.new(bar.Size.X.Scale, bar.Size.X.Offset, val, 0)
+			bar.BackgroundColor3 = State.VizColor:Lerp(Color3.new(1,1,1), val * 0.3)
+		end
 	end)
 
-	BtnFX.MouseButton1Click:Connect(function() FxScroll.Visible = not FxScroll.Visible; InputID.Visible = false end)
-	BtnID.MouseButton1Click:Connect(function() InputID.Visible = not InputID.Visible; FxScroll.Visible = false end)
+	local currentID = Graph.Nodes.Player.AssetId:gsub("rbxassetid://", "")
+	if currentID and currentID ~= "" then
+		task.spawn(function()
+			local s, i = pcall(function() return MarketplaceService:GetProductInfo(tonumber(currentID)) end)
+			NameCache[currentID] = (s and i) and i.Name or currentID
+			InfoTitle.Text = NameCache[currentID]
+		end)
+	else LoadTrack(CurrentIdx) end
 
-	InputID.FocusLost:Connect(function(enter)
-		if enter and tonumber(InputID.Text) then
-			table.insert(SavedAudio, InputID.Text)
-			plugin:SetSetting("Cassel_Saves", SavedAudio)
-			LoadTrack(#SavedAudio)
-		end
-		InputID.Visible = false
-	end)
-
-	-- Cleanup Routine
-	local function Close()
-		SetTab("None") -- Stops Viz
-		Graph:Destroy() -- Kills Audio Engine
-		Overlay:Destroy() -- Kills UI
-		-- Restore Siblings
-		for _, child in ipairs(HostWidget:GetChildren()) do
-			if child:IsA("GuiObject") then child.Visible = true end
-		end
-	end
-	BtnClose.MouseButton1Click:Connect(Close)
-
-	-- Init
-	LoadTrack(CurrentIdx)
+	UpdateTheme()
 end
